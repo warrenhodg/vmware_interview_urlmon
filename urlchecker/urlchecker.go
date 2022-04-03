@@ -2,100 +2,56 @@ package urlchecker
 
 import (
 	"context"
-	"sync"
+	"net/http"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-type UrlChecker struct {
-	logger  *zap.Logger
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	options *Options
-	c       chan string
+// URLChecker actually connects to the specified url
+// when performing its check
+type URLChecker struct {
+	client *http.Client
+	logger *zap.Logger
 }
 
-func New(logger *zap.Logger, options *Options) *UrlChecker {
-	return &UrlChecker{
-		logger:  logger.With(zap.String("module", "urlchecker")),
-		options: options,
+// NewURLChecker instantiates a new URLChecker
+func NewURLChecker(logger *zap.Logger) *URLChecker {
+	if logger != nil {
+		logger = logger.With(zap.String("module", "URLChecker"))
+	}
+
+	return &URLChecker{
+		client: &http.Client{},
+		logger: logger,
 	}
 }
 
-func (u *UrlChecker) Run(ctx context.Context) {
-	setupMetrics()
-
-	ctx, cancel := context.WithCancel(ctx)
-	u.cancel = cancel
-	u.c = make(chan string, u.options.workers)
-
-	for i := 0; i < u.options.workers; i++ {
-		u.wg.Add(1)
-		go u.work(ctx)
-	}
-
-	u.wg.Add(1)
-	go u.produce(ctx)
-}
-
-func (u *UrlChecker) produce(ctx context.Context) {
-	u.logger.Info("producer startup")
-	defer u.logger.Info("producer shutdown")
-	defer u.wg.Done()
-
-	ticker := time.NewTicker(u.options.checkPeriod)
-	defer ticker.Stop()
-
-	defer close(u.c)
-
-	// Loop until context is done (cancel func called)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case <-ticker.C:
-			u.logger.Info("producer starting monitoring cycle")
-
-			for _, url := range u.options.urls {
-				u.c <- url
-			}
-		}
-	}
-}
-
-func (u *UrlChecker) check(url string) {
-	up := false
-	start := time.Now()
+// Check actually reads the specified url with a GET method, and returns
+// up=true if the response code is 200, otherwise false
+func (u *URLChecker) Check(ctx context.Context, url string) (up bool, duration time.Duration) {
 	defer func() {
-		observe(url, up, time.Since(start))
+		if u.logger != nil {
+			u.logger.With(
+				zap.Bool("up", up),
+				zap.Duration("duration", duration),
+				zap.String("url", url),
+			).Info("checked url")
+		}
 	}()
 
-	u.logger.With(zap.String("url", url)).Info("checking url")
-	time.Sleep(time.Millisecond * 300)
-}
+	start := time.Now()
 
-func (u *UrlChecker) work(ctx context.Context) {
-	u.logger.Info("worker startup")
-	defer u.logger.Info("worker shutdown")
-	defer u.wg.Done()
-
-	// Loop will end when channel is closed
-	for url := range u.c {
-		u.check(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, time.Since(start)
 	}
-}
 
-// drainChan prevents a deadlock in the producer logic
-func (u *UrlChecker) drainChan() {
-	for range u.c {
+	res, err := u.client.Do(req)
+	if err != nil {
+		return false, time.Since(start)
 	}
-}
+	defer res.Body.Close()
 
-// Shutdown gracefully
-func (u *UrlChecker) Shutdown() {
-	u.cancel()
-	u.drainChan()
-	u.wg.Wait()
+	return res.StatusCode == http.StatusOK, time.Since(start)
 }

@@ -57,16 +57,19 @@ func setupMetrics() {
 }
 
 func run(logger *zap.Logger) error {
+	ctx := context.Background()
+
+	cfg, err := GetConfig()
+	if err != nil {
+		return fmt.Errorf("unable to get config options: %w", err)
+	}
+
 	logger.Info("app start")
 	defer logger.Info("app graceful stop")
 
-	ctx := context.Background()
-
-	cfg := GetConfig()
-
 	svrOptions := httpserver.
 		DefaultOptions().
-		ListenAddr(cfg.listenAddr)
+		ListenAddr(cfg.ListenAddr)
 	svr := httpserver.New(logger, svrOptions)
 
 	healthcheck.Init(logger)
@@ -75,12 +78,16 @@ func run(logger *zap.Logger) error {
 
 	ucOptions := urlchecker.
 		DefaultOptions().
-		Urls(cfg.urls).
-		CheckPeriod(cfg.checkPeriod).
-		Workers(cfg.workers)
-	uc := urlchecker.New(logger, ucOptions)
+		Urls(cfg.URLs).
+		CheckPeriod(cfg.CheckPeriod).
+		Workers(cfg.Workers)
+	checker := urlchecker.NewURLChecker(logger)
+	uc, err := urlchecker.New(logger, ucOptions, checker)
+	if err != nil {
+		return fmt.Errorf("unable to create urlchecker system: %w", err)
+	}
 
-	err := svr.Run()
+	err = svr.Run()
 	if err != nil {
 		return fmt.Errorf("unable to run httpserver: %w", err)
 	}
@@ -91,7 +98,7 @@ func run(logger *zap.Logger) error {
 
 	waitForTermination(ctx, logger)
 
-	failReadiness(ctx, logger, cfg.shutdownReadyFailDuration)
+	failReadiness(ctx, logger, cfg.ShutdownReadyFailDuration)
 
 	return nil
 }
